@@ -6,14 +6,37 @@ package mr
 // remember to capitalize all names.
 //
 
-import "os"
-import "strconv"
+import (
+	"os"
+	"strconv"
 
-//
+	"6.824/mr"
+)
+
 // example to show how to declare the arguments
 // and reply for an RPC.
-//
+type MapArgs struct {
+	Routinenum int
+}
+type MapReply struct {
+	Filename string
+}
+type ReduceArgs struct {
+	Routinenum int
+}
+type ReduceReply struct {
+	Isdone bool
+}
+type MaperrArgs struct {
+	Filename string
+}
+type EmitMArgs struct {
+	Intermediate []mr.KeyValue
+}
 
+type MaperrReply struct {
+	Isdone bool
+}
 type ExampleArgs struct {
 	X int
 }
@@ -23,7 +46,6 @@ type ExampleReply struct {
 }
 
 // Add your RPC definitions here.
-
 
 // Cook up a unique-ish UNIX-domain socket name
 // in /var/tmp, for the coordinator.
