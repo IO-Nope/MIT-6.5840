@@ -1,6 +1,6 @@
 # MIT-6.5840 分布式系统
 
-[课程链接](https://www.example.com)
+[课程链接]()
 ## 完成情况
  - [ ] Lab1: MapReduce
  - [ ] Lab2A: Raft, leader election
@@ -38,14 +38,36 @@
             - Reduce任务:
             rules规定reduce任务需要分成nReduce个数并将中间结果存储在mr-out-X-Y.txt中要一行一行，其中X是Mapid Y是ihash得到的Reduceid
 - [ ] 制作相应结构
-    - MapJabs 
+    - Jab 
     ```
+    type Job struct {
+        JobType   JobType
+        FileName  []string
+        Reducenum int
+        Jobid     int
+    }
     ```
     - Coordinator
     ```
+    
+    type Coordinator struct {
+        JobchanMap    chan *Job
+        JobchanReduce chan *Job
+        Mapnum        int
+        ReduceNum     int
+        uniJobid      int
+        mu            sync.Mutex
+        isDone        bool
+    }
     ```
     - RPCS
     ```
+    type JobRequestArgs struct {
+        WorkerId int
+    }
+    type JobRequestReply struct {
+        Job *Job
+    }
     ```
 ---
 ```
