@@ -37,7 +37,7 @@
             <-filename中用mrsequential.go中的代码将其分割成kv对 包含着任务id Emit出去给coordinator
             - Reduce任务:
             rules规定reduce任务需要分成nReduce个数并将中间结果存储在mr-out-X-Y.txt中要一行一行，其中X是Mapid Y是ihash得到的Reduceid
-- [ ] 制作相应结构
+- [x] 制作相应结构
     - Jab 
     ```
     type Job struct {
@@ -69,6 +69,7 @@
         Job *Job
     }
     ```
+- [ ] 时间不够了笔记找时间补
 ---
 ```
  

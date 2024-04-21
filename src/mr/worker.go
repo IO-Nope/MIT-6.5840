@@ -8,12 +8,54 @@ import (
 	"log"
 	"net/rpc"
 	"os"
+	pf "path/filepath"
+	"sort"
 	"strconv"
+	"sync"
 	"time"
 )
 
-var initid int = 0
 var IsDebug bool = true
+
+// for sorting by key.
+type ByKey []KeyValue
+
+// for sorting by key.
+func (a ByKey) Len() int           { return len(a) }
+func (a ByKey) Swap(i, j int)      { a[i], a[j] = a[j], a[i] }
+func (a ByKey) Less(i, j int) bool { return a[i].Key < a[j].Key }
+
+type WriteType struct {
+	Kvs  []KeyValue
+	Path string
+}
+type ReadType struct {
+	Path string
+	Kvs  []KeyValue
+}
+type IOChannel struct {
+	WriteChannel chan []WriteType
+	WriteWg      sync.WaitGroup
+	ReadChannel  chan []ReadType
+	ReadWg       sync.WaitGroup
+}
+type WorkerSync struct {
+	wg     sync.WaitGroup
+	mu     sync.Mutex
+	Workid int
+}
+
+var WorkerSyncs = WorkerSync{
+	wg:     sync.WaitGroup{},
+	mu:     sync.Mutex{},
+	Workid: 0,
+}
+var IOJson = IOChannel{
+	WriteChannel: make(chan []WriteType, 20),
+	WriteWg:      sync.WaitGroup{},
+	ReadChannel:  make(chan []ReadType, 20),
+	ReadWg:       sync.WaitGroup{},
+}
 
 func Check(e error) {
 	if !IsDebug {
@@ -43,23 +85,26 @@ func Worker(mapf func(string, string) []KeyValue,
 	reducef func(string, []string) string) {
 
 	// Your worker implementation here.
+	// 初始化
 	for {
-		Job := JobRequest(initid)
-		initid += 1
-		if Job == nil {
+		workerid := WorkerSyncs.Workid
+		job := JobRequest(workerid)
+		WorkerSyncs.Workid++
+		if job == nil {
 			time.Sleep(1 * time.Second)
+			WorkerSyncs.wg.Wait()
+			if IsDebug {
+				fmt.Println("no job,wating...1s")
+			}
 			continue
 		}
-		if Job == nil {
-			break
-
-		}
 		if IsDebug {
-			fmt.Println(Job.JobType, Job.FileName, Job.Reducenum, Job.Jobid)
+			fmt.Println(job.JobType, job.FileName, job.Jobid)
 		}
-		switch Job.JobType {
+		switch job.JobType {
 		case MapJob:
-			go func() {
+			WorkerSyncs.wg.Add(1)
+			go func(workerid int, Job *Job) {
 				intermediate := []KeyValue{}
 				file, err := os.Open("../main/" + Job.FileName[0])
 				if IsDebug {
@@ -71,14 +116,61 @@ func Worker(mapf func(string, string) []KeyValue,
 				file.Close()
 				kva := mapf(Job.FileName[0], string(content))
 				intermediate = append(intermediate, kva...)
-				path := "../main/" + "mr-" + strconv.Itoa(Job.Jobid) + "-" + strconv.Itoa(ihash(Job.FileName[0])) + ".json"
-				WriteKvsToJson(intermediate, path)
-				SendMapJobDone(Job)
-			}()
+				for _, kv := range intermediate {
+					IOJson.WriteWg.Add(1)
+					go func(kv KeyValue) {
+						path := "../main/" + "mr-" + strconv.Itoa(Job.Jobid) + "-" + strconv.Itoa(ihash(kv.Key)%10) + ".json"
+						IOJson.WriteChannel <- []WriteType{{Kvs: []KeyValue{kv}, Path: path}}
+						WriteTrigger()
+						fs := "mr-" + strconv.Itoa(Job.Jobid) + "-" + strconv.Itoa(ihash(kv.Key)%10) + ".json"
+						WorkerSyncs.mu.Lock()
+						for i, f := range Job.FileName {
+							if f == fs {
+								break
+							}
+							if i == len(Job.FileName)-1 {
+								Job.FileName = append(Job.FileName, fs)
+							}
+						}
+						WorkerSyncs.mu.Unlock()
+					}(kv)
+				}
+				SendJobDone(Job, workerid)
+			}(workerid, job)
 		case ReduceJob:
 			// reduce
-		default:
-			break
+			go func(workerid int, job *Job) {
+				intermediate := []KeyValue{}
+				for _, filename := range job.FileName {
+					path := "../main/" + filename
+					kvs := ReadKvsFromJson(path)
+					intermediate = append(intermediate, kvs...)
+				}
+				sort.Sort(ByKey(intermediate))
+				oname := "../main/" + "mr-out-" + strconv.Itoa(job.Reducenum) + ".txt"
+				ofile, _ := os.Create(oname)
+				i := 0
+				for i < len(intermediate) {
+					j := i + 1
+					for j < len(intermediate) && intermediate[j].Key == intermediate[i].Key {
+						j++
+					}
+					values := []string{}
+					for k := i; k < j; k++ {
+						values = append(values, intermediate[k].Value)
+					}
+					output := reducef(intermediate[i].Key, values)
+
+					// this is the correct format for each line of Reduce output.
+					fmt.Fprintf(ofile, "%v %v\n", intermediate[i].Key, output)
+
+					i = j
+				}
+				ofile.Close()
+				SendJobDone(job, workerid)
+			}(workerid, job)
+		case Done:
+			return
 		}
 	}
 	// uncomment to send the Example RPC to the coordinator.
@@ -87,8 +179,13 @@ func Worker(mapf func(string, string) []KeyValue,
 func Debugfunc(vals ...interface{}) {
 
 }
+func WriteTrigger() {
+	WriteTemp := <-IOJson.WriteChannel
+	WriteKvsToJson(WriteTemp[0].Kvs, WriteTemp[0].Path)
+	IOJson.WriteWg.Done()
+}
 func WriteKvsToJson(kvs []KeyValue, filepath string) {
-	file, err := os.Create(filepath)
+	file, err := os.OpenFile(filepath, os.O_APPEND|os.O_WRONLY|os.O_CREATE, 0666)
 	Check(err)
 	defer file.Close()
 	enc := json.NewEncoder(file)
@@ -100,8 +197,62 @@ func WriteKvsToJson(kvs []KeyValue, filepath string) {
 		}
 	}
 }
-func SendMapJobDone(Job *Job) {
+func AimFiles(filepath string, aimnum int) []string {
+	file, err := os.ReadDir(filepath)
+	Check(err)
+	Filesname := []string{}
+	for _, f := range file {
+		if f.Type().IsDir() {
+			continue
+		}
+		if pf.Ext(filepath+"/"+f.Name()) != ".json" {
+			continue
+		}
+		if f.Name()[len(f.Name())-6] == strconv.Itoa(aimnum)[0] {
+			Filesname = append(Filesname, filepath+"/"+f.Name())
+		}
+	}
+	return Filesname
+}
+func ReadTrigger() {
 
+}
+func ReadKvsFromJson(filepath string) []KeyValue {
+	file, err := os.Open(filepath)
+	if err != nil {
+		if IsDebug {
+			fmt.Fprintln(os.Stderr, "open file error", err, filepath)
+		}
+		return nil
+	}
+	defer file.Close()
+	dec := json.NewDecoder(file)
+	kva := []KeyValue{}
+	for {
+		var kv KeyValue
+		if err := dec.Decode(&kv); err != nil {
+			break
+		}
+		kva = append(kva, kv)
+	}
+
+	return kva
+}
+func SendJobDone(Job *Job, workerid int) {
+	switch Job.JobType {
+	case MapJob:
+		IOJson.WriteWg.Wait()
+		WorkerSyncs.wg.Done()
+	case ReduceJob:
+	}
+	args := JobDoneArgs{Job: Job, Workerid: workerid}
+	reply := JobDoneReply{}
+	ok := call("Coordinator.JobDone", &args, &reply)
+	if ok {
+		if IsDebug {
+			fmt.Println("reply.IsReceive", Job.FileName, Job.Jobid, workerid)
+		}
+	}
 }
 func JobRequest(workerId int) *Job {
 	args := JobRequestArgs{WorkerId: workerId}

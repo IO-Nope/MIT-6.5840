@@ -26,6 +26,13 @@ type ExampleReply struct {
 type JobRequestArgs struct {
 	WorkerId int
 }
+type JobDoneArgs struct {
+	Job      *Job
+	Workerid int
+}
+type JobDoneReply struct {
+	IsReceive bool
+}
 type JobRequestReply struct {
 	Job *Job
 }
