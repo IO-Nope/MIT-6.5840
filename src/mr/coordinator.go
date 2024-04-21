@@ -89,7 +89,7 @@ func (c *Coordinator) JobDone(args *JobDoneArgs, reply *JobDoneReply) error {
 			fmt.Println("mapnum", Mn)
 		}
 		if Mn == 0 {
-			c.SendReduceJob()
+			go c.SendReduceJob()
 		}
 	case ReduceJob:
 		c.redwg.Done()

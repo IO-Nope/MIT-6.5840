@@ -11,8 +11,6 @@ import (
 	pf "path/filepath"
 	"sort"
 	"strconv"
-	"sync"
-	"time"
 )
 
 var IsDebug bool = true
@@ -32,29 +30,6 @@ type WriteType struct {
 type ReadType struct {
 	Path string
 	Kvs  []KeyValue
-}
-type IOChannel struct {
-	WriteChannel chan []WriteType
-	WriteWg      sync.WaitGroup
-	ReadChannel  chan []ReadType
-	ReadWg       sync.WaitGroup
-}
-type WorkerSync struct {
-	wg     sync.WaitGroup
-	mu     sync.Mutex
-	Workid int
-}
-
-var WorkerSyncs = WorkerSync{
-	wg:     sync.WaitGroup{},
-	mu:     sync.Mutex{},
-	Workid: 0,
-}
-var IOJson = IOChannel{
-	WriteChannel: make(chan []WriteType, 20),
-	WriteWg:      sync.WaitGroup{},
-	ReadChannel:  make(chan []ReadType, 20),
-	ReadWg:       sync.WaitGroup{},
 }
 
 func Check(e error) {
@@ -86,110 +61,93 @@ func Worker(mapf func(string, string) []KeyValue,
 
 	// Your worker implementation here.
 	// 初始化
-	for {
-		workerid := WorkerSyncs.Workid
-		job := JobRequest(workerid)
-		WorkerSyncs.Workid++
-		if job == nil {
-			time.Sleep(1 * time.Second)
-			WorkerSyncs.wg.Wait()
-			if IsDebug {
-				fmt.Println("no job,wating...1s")
-			}
-			continue
-		}
+
+	job := JobRequest(0)
+	if job == nil {
 		if IsDebug {
-			fmt.Println(job.JobType, job.FileName, job.Jobid)
+			fmt.Println("no job")
 		}
-		switch job.JobType {
-		case MapJob:
-			WorkerSyncs.wg.Add(1)
-			go func(workerid int, Job *Job) {
-				intermediate := []KeyValue{}
-				file, err := os.Open("../main/" + Job.FileName[0])
-				if IsDebug {
-					fmt.Println(Job.FileName[0])
-				}
-				Check(err)
-				content, err := io.ReadAll(file)
-				Check(err)
-				file.Close()
-				kva := mapf(Job.FileName[0], string(content))
-				intermediate = append(intermediate, kva...)
-				for _, kv := range intermediate {
-					IOJson.WriteWg.Add(1)
-					go func(kv KeyValue) {
-						path := "../main/" + "mr-" + strconv.Itoa(Job.Jobid) + "-" + strconv.Itoa(ihash(kv.Key)%10) + ".json"
-						IOJson.WriteChannel <- []WriteType{{Kvs: []KeyValue{kv}, Path: path}}
-						WriteTrigger()
-						fs := "mr-" + strconv.Itoa(Job.Jobid) + "-" + strconv.Itoa(ihash(kv.Key)%10) + ".json"
-						WorkerSyncs.mu.Lock()
-						for i, f := range Job.FileName {
-							if f == fs {
-								break
-							}
-							if i == len(Job.FileName)-1 {
-								Job.FileName = append(Job.FileName, fs)
-							}
-						}
-						WorkerSyncs.mu.Unlock()
-					}(kv)
-				}
-				SendJobDone(Job, workerid)
-			}(workerid, job)
-		case ReduceJob:
-			// reduce
-			go func(workerid int, job *Job) {
-				intermediate := []KeyValue{}
-				for _, filename := range job.FileName {
-					path := "../main/" + filename
-					kvs := ReadKvsFromJson(path)
-					intermediate = append(intermediate, kvs...)
-				}
-				sort.Sort(ByKey(intermediate))
-				oname := "../main/" + "mr-out-" + strconv.Itoa(job.Reducenum) + ".txt"
-				ofile, _ := os.Create(oname)
-				i := 0
-				for i < len(intermediate) {
-					j := i + 1
-					for j < len(intermediate) && intermediate[j].Key == intermediate[i].Key {
-						j++
-					}
-					values := []string{}
-					for k := i; k < j; k++ {
-						values = append(values, intermediate[k].Value)
-					}
-					output := reducef(intermediate[i].Key, values)
-
-					// this is the correct format for each line of Reduce output.
-					fmt.Fprintf(ofile, "%v %v\n", intermediate[i].Key, output)
-
-					i = j
-				}
-				ofile.Close()
-				SendJobDone(job, workerid)
-			}(workerid, job)
-		case Done:
-			return
-		}
+		return
 	}
-	// uncomment to send the Example RPC to the coordinator.
-	// CallExample()
+	if IsDebug {
+		fmt.Println(job.JobType, job.FileName, job.Jobid)
+	}
+	switch job.JobType {
+	case MapJob:
+		intermediate := []KeyValue{}
+		file, err := os.Open("../main/" + job.FileName[0])
+		if IsDebug {
+			fmt.Println(job.FileName[0])
+		}
+		Check(err)
+		content, err := io.ReadAll(file)
+		Check(err)
+		file.Close()
+		kva := mapf(job.FileName[0], string(content))
+		intermediate = append(intermediate, kva...)
+		for _, kv := range intermediate {
+			path := "../main/" + "mr-" + strconv.Itoa(job.Jobid) + "-" + strconv.Itoa(ihash(kv.Key)%10) + ".json"
+			writedone := WriteType{Kvs: []KeyValue{kv}, Path: path}
+			WriteKvsToJson(writedone)
+			fs := "mr-" + strconv.Itoa(job.Jobid) + "-" + strconv.Itoa(ihash(kv.Key)%10) + ".json"
+			for i, f := range job.FileName {
+				if f == fs {
+					break
+				}
+				if i == len(job.FileName)-1 {
+					job.FileName = append(job.FileName, fs)
+				}
+			}
+
+		}
+		SendJobDone(job, 0)
+	case ReduceJob:
+		// reduce
+		intermediate := []KeyValue{}
+		for _, filename := range job.FileName {
+			path := "../main/" + filename
+			kvs := ReadKvsFromJson(path)
+			intermediate = append(intermediate, kvs...)
+		}
+		sort.Sort(ByKey(intermediate))
+		oname := "../main/" + "mr-out-" + strconv.Itoa(job.Reducenum) + ".txt"
+		ofile, _ := os.Create(oname)
+		i := 0
+		for i < len(intermediate) {
+			j := i + 1
+			for j < len(intermediate) && intermediate[j].Key == intermediate[i].Key {
+				j++
+			}
+			values := []string{}
+			for k := i; k < j; k++ {
+				values = append(values, intermediate[k].Value)
+			}
+			output := reducef(intermediate[i].Key, values)
+
+			// this is the correct format for each line of Reduce output.
+			fmt.Fprintf(ofile, "%v %v\n", intermediate[i].Key, output)
+
+			i = j
+		}
+		ofile.Close()
+		SendJobDone(job, 0)
+	case Done:
+		return
+	}
 }
+
+// uncomment to send the Example RPC to the coordinator.
+// CallExample()
+
 func Debugfunc(vals ...interface{}) {
 
 }
-func WriteTrigger() {
-	WriteTemp := <-IOJson.WriteChannel
-	WriteKvsToJson(WriteTemp[0].Kvs, WriteTemp[0].Path)
-	IOJson.WriteWg.Done()
-}
-func WriteKvsToJson(kvs []KeyValue, filepath string) {
-	file, err := os.OpenFile(filepath, os.O_APPEND|os.O_WRONLY|os.O_CREATE, 0666)
+func WriteKvsToJson(kvswtype WriteType) {
+	file, err := os.OpenFile(kvswtype.Path, os.O_APPEND|os.O_WRONLY|os.O_CREATE, 0666)
 	Check(err)
 	defer file.Close()
 	enc := json.NewEncoder(file)
-	for _, kv := range kvs {
+	for _, kv := range kvswtype.Kvs {
 		err := enc.Encode(&kv)
 		Check(err)
 		if err != nil {
@@ -239,12 +197,6 @@ func ReadKvsFromJson(filepath string) []KeyValue {
 	return kva
 }
 func SendJobDone(Job *Job, workerid int) {
-	switch Job.JobType {
-	case MapJob:
-		IOJson.WriteWg.Wait()
-		WorkerSyncs.wg.Done()
-	case ReduceJob:
-	}
 	args := JobDoneArgs{Job: Job, Workerid: workerid}
 	reply := JobDoneReply{}
 	ok := call("Coordinator.JobDone", &args, &reply)
