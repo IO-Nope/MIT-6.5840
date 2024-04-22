@@ -1,6 +1,7 @@
 package mr
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"hash/fnv"
@@ -8,9 +9,9 @@ import (
 	"log"
 	"net/rpc"
 	"os"
-	pf "path/filepath"
 	"sort"
 	"strconv"
+	"time"
 )
 
 var IsDebug bool = true
@@ -62,7 +63,10 @@ func Worker(mapf func(string, string) []KeyValue,
 	// Your worker implementation here.
 	// 初始化
 
-	job := JobRequest(0)
+	job, workerid := JobRequest()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go AliveBeats(workerid, ctx)
 	if job == nil {
 		if IsDebug {
 			fmt.Println("no job")
@@ -70,11 +74,15 @@ func Worker(mapf func(string, string) []KeyValue,
 		return
 	}
 	if IsDebug {
-		fmt.Println(job.JobType, job.FileName, job.Jobid)
+		fmt.Println("jobtype:", job.JobType, "jobfiles:", job.FileName, "jobid:", job.Jobid)
 	}
 	switch job.JobType {
 	case MapJob:
 		intermediate := []KeyValue{}
+		Rq := ReadRequest(workerid, job.Jobid)
+		if !Rq {
+			return
+		}
 		file, err := os.Open("../main/" + job.FileName[0])
 		if IsDebug {
 			fmt.Println(job.FileName[0])
@@ -85,6 +93,11 @@ func Worker(mapf func(string, string) []KeyValue,
 		file.Close()
 		kva := mapf(job.FileName[0], string(content))
 		intermediate = append(intermediate, kva...)
+		// 写入json
+		Wq := WriteRequest(workerid, job.Jobid)
+		if !Wq {
+			return
+		}
 		for _, kv := range intermediate {
 			path := "../main/" + "mr-" + strconv.Itoa(job.Jobid) + "-" + strconv.Itoa(ihash(kv.Key)%10) + ".json"
 			writedone := WriteType{Kvs: []KeyValue{kv}, Path: path}
@@ -100,10 +113,14 @@ func Worker(mapf func(string, string) []KeyValue,
 			}
 
 		}
-		SendJobDone(job, 0)
+		SendJobDone(job, workerid)
 	case ReduceJob:
 		// reduce
 		intermediate := []KeyValue{}
+		Rq := ReadRequest(workerid, job.Jobid)
+		if !Rq {
+			return
+		}
 		for _, filename := range job.FileName {
 			path := "../main/" + filename
 			kvs := ReadKvsFromJson(path)
@@ -111,6 +128,10 @@ func Worker(mapf func(string, string) []KeyValue,
 		}
 		sort.Sort(ByKey(intermediate))
 		oname := "../main/" + "mr-out-" + strconv.Itoa(job.Reducenum) + ".txt"
+		Wq := WriteRequest(workerid, job.Jobid)
+		if !Wq {
+			return
+		}
 		ofile, _ := os.Create(oname)
 		i := 0
 		for i < len(intermediate) {
@@ -130,7 +151,7 @@ func Worker(mapf func(string, string) []KeyValue,
 			i = j
 		}
 		ofile.Close()
-		SendJobDone(job, 0)
+		SendJobDone(job, workerid)
 	case Done:
 		return
 	}
@@ -138,10 +159,10 @@ func Worker(mapf func(string, string) []KeyValue,
 
 // uncomment to send the Example RPC to the coordinator.
 // CallExample()
+// 一个用来debug的func
+func Debugfunc(vals ...interface{}) {}
 
-func Debugfunc(vals ...interface{}) {
-
-}
+// 将kv对写入.json
 func WriteKvsToJson(kvswtype WriteType) {
 	file, err := os.OpenFile(kvswtype.Path, os.O_APPEND|os.O_WRONLY|os.O_CREATE, 0666)
 	Check(err)
@@ -155,26 +176,30 @@ func WriteKvsToJson(kvswtype WriteType) {
 		}
 	}
 }
-func AimFiles(filepath string, aimnum int) []string {
-	file, err := os.ReadDir(filepath)
-	Check(err)
-	Filesname := []string{}
-	for _, f := range file {
-		if f.Type().IsDir() {
-			continue
-		}
-		if pf.Ext(filepath+"/"+f.Name()) != ".json" {
-			continue
-		}
-		if f.Name()[len(f.Name())-6] == strconv.Itoa(aimnum)[0] {
-			Filesname = append(Filesname, filepath+"/"+f.Name())
-		}
-	}
-	return Filesname
-}
-func ReadTrigger() {
 
+// 读取请求
+func ReadRequest(workerid int, jobid int) bool {
+	args := JobCheckArgs{Jobid: jobid, Workerid: workerid}
+	reply := JobCheckReply{}
+	ok := call("Coordinator.JobCheck", &args, &reply)
+	if !ok {
+		return false
+	}
+	return reply.IsAllow
 }
+
+// 写入请求
+func WriteRequest(workerid int, jobid int) bool {
+	args := JobCheckArgs{Jobid: jobid, Workerid: workerid}
+	reply := JobCheckReply{}
+	ok := call("Coordinator.JobCheck", &args, &reply)
+	if !ok {
+		return false
+	}
+	return reply.IsAllow
+}
+
+// 从.json读取kv对
 func ReadKvsFromJson(filepath string) []KeyValue {
 	file, err := os.Open(filepath)
 	if err != nil {
@@ -202,19 +227,37 @@ func SendJobDone(Job *Job, workerid int) {
 	ok := call("Coordinator.JobDone", &args, &reply)
 	if ok {
 		if IsDebug {
-			fmt.Println("reply.IsReceive", Job.FileName, Job.Jobid, workerid)
+			fmt.Println("JobDone! jobtype:", Job.JobType, "jobid:", Job.Jobid, "workerid:", workerid)
 		}
 	}
 }
-func JobRequest(workerId int) *Job {
-	args := JobRequestArgs{WorkerId: workerId}
+func JobRequest() (*Job, int) {
+	args := JobRequestArgs{AskJob: true}
 	reply := JobRequestReply{}
 	ok := call("Coordinator.GetJob", &args, &reply)
 	if ok {
 		//fmt.Println("reply.Y", reply.Job.jobid)
-		return reply.Job
+		return reply.Job, reply.Workerid
 	}
-	return nil
+	return nil, -1
+}
+func AliveBeats(workerId int, ctx context.Context) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+			time.Sleep(1 * time.Second)
+			args := HreatBeatArgs{WorkerId: workerId}
+			reply := HreatBeatReply{}
+			ok := call("Coordinator.WorkerTracker", &args, &reply)
+			if ok {
+				if IsDebug {
+					fmt.Println("reply.IsReceive", reply.IsReceive)
+				}
+			}
+		}
+	}
 }
 
 // example function to show how to make an RPC call to the coordinator.

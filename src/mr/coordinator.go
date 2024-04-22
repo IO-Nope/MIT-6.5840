@@ -8,9 +8,10 @@ import (
 	"net/rpc"
 	"os"
 	"sync"
+	"time"
 )
 
-type JobType int // 0: map, 1: reduce
+type JobType int // 0: map, 1: reduce 2: done
 const (
 	MapJob    JobType = iota
 	ReduceJob JobType = iota
@@ -26,12 +27,14 @@ type Job struct {
 
 type Coordinator struct {
 	// Your definitions here.
-	JobchanMap           chan *Job
-	JobchanReduce        chan *Job
+	Jobchan              chan *Job
 	JobchanReducePrapare chan *Job
+	Jobtracker           sync.Map
+	Worktracker          sync.Map
 	Mapnum               int
 	ReduceNum            int
 	uniJobid             int
+	uniWorkerid          int
 	mu                   sync.Mutex
 	isDone               bool
 	mapwg                sync.WaitGroup
@@ -48,22 +51,82 @@ func (c *Coordinator) Example(args *ExampleArgs, reply *ExampleReply) error {
 	reply.Y = args.X + 2
 	return nil
 }
+
+// 向worker发布任务
 func (c *Coordinator) GetJob(args *JobRequestArgs, reply *JobRequestReply) error {
 	select {
-	case job := <-c.JobchanMap:
-		fmt.Println("get map job", job.Jobid)
+	case job := <-c.Jobchan:
+		fmt.Println("get job:", job.Jobid, "job type:", job.JobType)
 		reply.Job = job
-	case job := <-c.JobchanReduce:
-		fmt.Println("get reduce job", job.Jobid)
-		reply.Job = job
+		reply.Workerid = c.generateWorkerid()
+		c.Worktracker.Store(reply.Workerid, 0)
+		go c.TrackJob(reply.Workerid, job)
 	default:
 		reply.Job = nil
 	}
 	return nil
 }
 
+// 追踪worker
+func (c *Coordinator) WorkerTracker(args *HreatBeatArgs, reply *HreatBeatReply) error {
+	reply.IsReceive = true
+	c.Worktracker.Store(args.WorkerId, 1)
+	return nil
+}
+
+// 检查任务
+func (c *Coordinator) JobCheck(args *JobCheckArgs, reply *JobCheckReply) error {
+	value, ok := c.Jobtracker.Load(args.Workerid)
+	if !ok {
+		reply.IsAllow = false
+		return nil
+	}
+	if value.(*Job).Jobid == args.Jobid {
+		reply.IsAllow = true
+		return nil
+	}
+	reply.IsAllow = false
+	return nil
+
+}
+
+// 追踪任务
+func (c *Coordinator) TrackJob(workerid int, job *Job) error {
+	c.Jobtracker.Store(workerid, job)
+	timer := 0
+	for {
+		time.Sleep(1 * time.Second)
+		if IsDebug {
+			fmt.Println("track job:", job.Jobid, "job Type:", job.JobType)
+		}
+		value, ok := c.Worktracker.Load(workerid)
+		if !ok {
+			fmt.Println("workerid", workerid, "not found", "tacker job stop!")
+			return nil
+		}
+		if value != 0 {
+			c.Worktracker.Store(workerid, 0)
+			timer = 0
+			continue
+		}
+		timer++
+		if timer > 10 {
+			fmt.Println("workerid", workerid, "jobid", job.Jobid, "timeout")
+			c.Jobtracker.Delete(workerid)
+			c.Worktracker.Delete(workerid)
+			c.Jobchan <- job
+			return nil
+		}
+	}
+}
+
 // 完成任务
 func (c *Coordinator) JobDone(args *JobDoneArgs, reply *JobDoneReply) error {
+	c.Worktracker.Delete(args.Workerid)
+	c.Jobtracker.Delete(args.Workerid)
+	if IsDebug {
+		fmt.Println("job done", args.Job.Jobid, args.Workerid)
+	}
 	switch args.Job.JobType {
 	case MapJob:
 		c.mapwg.Done()
@@ -71,22 +134,19 @@ func (c *Coordinator) JobDone(args *JobDoneArgs, reply *JobDoneReply) error {
 		c.Mapnum--
 		Mn := c.Mapnum
 		c.mu.Unlock()
-		fmt.Println("receive files", args.Job.FileName)
+		if IsDebug {
+			fmt.Println("receive files", args.Job.FileName)
+		}
 		for i, fn := range args.Job.FileName {
 			if i == 0 {
 				continue
 			}
 			TempJob := <-c.JobchanReducePrapare
-			c.mu.Lock()
 			TempJob.FileName = append(TempJob.FileName, fn)
 			if IsDebug {
 				fmt.Println("reduce job", TempJob.Jobid, fn)
 			}
-			c.mu.Unlock()
 			c.JobchanReducePrapare <- TempJob
-		}
-		if IsDebug {
-			fmt.Println("mapnum", Mn)
 		}
 		if Mn == 0 {
 			go c.SendReduceJob()
@@ -107,6 +167,12 @@ func (c *Coordinator) JobDone(args *JobDoneArgs, reply *JobDoneReply) error {
 	return nil
 }
 
+// 任务失败
+func (c *Coordinator) JobFailed(args *JobDoneArgs, reply *JobDoneReply) error {
+	//to do
+	return nil
+}
+
 // 制作map任务
 func (c *Coordinator) MakeMapJob(files []string) {
 	for _, fp := range files {
@@ -123,17 +189,26 @@ func (c *Coordinator) MakeMapJob(files []string) {
 				Reducenum: 0,
 				Jobid:     id,
 			}
-			fmt.Println("jobid", id)
-			c.JobchanMap <- job
+			c.Jobchan <- job
 		}(fp)
 	}
 }
+
+// 生成jobid
 func (c *Coordinator) generateJobid() int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.uniJobid += 1
-	fmt.Println(c.uniJobid)
 	return c.uniJobid
+}
+
+// 生成workerid
+func (c *Coordinator) generateWorkerid() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.uniWorkerid += 1
+	return c.uniWorkerid
+
 }
 
 // 制作reduce任务
@@ -166,8 +241,10 @@ func (c *Coordinator) SendReduceJob() {
 	for {
 		select {
 		case job := <-c.JobchanReducePrapare:
-			fmt.Println("send reduce job", job.Jobid, job.FileName)
-			c.JobchanReduce <- job
+			if IsDebug {
+				fmt.Println("send reduce job", job.Jobid, job.FileName)
+			}
+			c.Jobchan <- job
 		default:
 			return
 		}
@@ -177,7 +254,7 @@ func (c *Coordinator) SendReduceJob() {
 // 发送done任务
 func (c *Coordinator) SendDoneJob() {
 	c.redwg.Wait()
-	c.JobchanReduce <- &Job{
+	c.Jobchan <- &Job{
 		JobType:   Done,
 		FileName:  []string{},
 		Reducenum: 0,
@@ -221,12 +298,14 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	c := Coordinator{}
 	// Your code here.
 	//初始化coordinator
-	c.JobchanMap = make(chan *Job)
-	c.JobchanReduce = make(chan *Job)
+	c.Jobchan = make(chan *Job)
 	c.JobchanReducePrapare = make(chan *Job, 10)
+	c.Jobtracker = sync.Map{}
+	c.Worktracker = sync.Map{}
 	c.uniJobid = 0
 	c.Mapnum = 0
 	c.ReduceNum = 0
+	c.uniJobid = 0
 	c.mu = sync.Mutex{}
 	c.mapwg = sync.WaitGroup{}
 	c.redwg = sync.WaitGroup{}
@@ -236,6 +315,7 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	c.server()
 	//制作map任务
 	go c.MakeMapJob(files)
+	//制作reduce任务
 	go c.MakeReduceJob(nReduce)
 	return &c
 }

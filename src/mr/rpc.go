@@ -24,7 +24,7 @@ type ExampleReply struct {
 	Y int
 }
 type JobRequestArgs struct {
-	WorkerId int
+	AskJob bool
 }
 type JobDoneArgs struct {
 	Job      *Job
@@ -34,7 +34,21 @@ type JobDoneReply struct {
 	IsReceive bool
 }
 type JobRequestReply struct {
-	Job *Job
+	Job      *Job
+	Workerid int
+}
+type HreatBeatArgs struct {
+	WorkerId int
+}
+type HreatBeatReply struct {
+	IsReceive bool
+}
+type JobCheckArgs struct {
+	Jobid    int
+	Workerid int
+}
+type JobCheckReply struct {
+	IsAllow bool
 }
 
 // Add your RPC definitions here.
