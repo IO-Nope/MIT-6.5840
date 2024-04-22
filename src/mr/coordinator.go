@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/rpc"
 	"os"
+	"strconv"
 	"sync"
 	"time"
 )
@@ -27,19 +28,19 @@ type Job struct {
 
 type Coordinator struct {
 	// Your definitions here.
-	Jobchan              chan *Job
-	JobchanReducePrapare chan *Job
-	Jobtracker           sync.Map
-	Worktracker          sync.Map
-	Mapnum               int
-	ReduceNum            int
-	uniJobid             int
-	uniWorkerid          int
-	mu                   sync.Mutex
-	isDone               bool
-	mapwg                sync.WaitGroup
-	redwg                sync.WaitGroup
-	redpwg               sync.WaitGroup
+	Jobchan           chan *Job
+	JobReducePrapares sync.Map
+	Jobtracker        sync.Map
+	Worktracker       sync.Map
+	Mapnum            int
+	ReduceNum         int
+	uniJobid          int
+	uniWorkerid       int
+	mu                sync.Mutex
+	isDone            bool
+	mapwg             sync.WaitGroup
+	redwg             sync.WaitGroup
+	redpwg            sync.WaitGroup
 }
 
 // Your code here -- RPC handlers for the worker to call.
@@ -56,7 +57,9 @@ func (c *Coordinator) Example(args *ExampleArgs, reply *ExampleReply) error {
 func (c *Coordinator) GetJob(args *JobRequestArgs, reply *JobRequestReply) error {
 	select {
 	case job := <-c.Jobchan:
-		fmt.Println("get job:", job.Jobid, "job type:", job.JobType)
+		if IsDebug {
+			fmt.Println("get job:", job.Jobid, "job type:", job.JobType)
+		}
 		reply.Job = job
 		reply.Workerid = c.generateWorkerid()
 		c.Worktracker.Store(reply.Workerid, 0)
@@ -101,7 +104,9 @@ func (c *Coordinator) TrackJob(workerid int, job *Job) error {
 		}
 		value, ok := c.Worktracker.Load(workerid)
 		if !ok {
-			fmt.Println("workerid", workerid, "not found", "tacker job stop!")
+			if IsDebug {
+				fmt.Println("workerid", workerid, "not found", "tacker job stop!")
+			}
 			return nil
 		}
 		if value != 0 {
@@ -111,7 +116,9 @@ func (c *Coordinator) TrackJob(workerid int, job *Job) error {
 		}
 		timer++
 		if timer > 10 {
-			fmt.Println("workerid", workerid, "jobid", job.Jobid, "timeout")
+			if IsDebug {
+				fmt.Println("workerid", workerid, "jobid", job.Jobid, "timeout")
+			}
 			c.Jobtracker.Delete(workerid)
 			c.Worktracker.Delete(workerid)
 			c.Jobchan <- job
@@ -141,20 +148,30 @@ func (c *Coordinator) JobDone(args *JobDoneArgs, reply *JobDoneReply) error {
 			if i == 0 {
 				continue
 			}
-			TempJob := <-c.JobchanReducePrapare
-			TempJob.FileName = append(TempJob.FileName, fn)
-			if IsDebug {
-				fmt.Println("reduce job", TempJob.Jobid, fn)
+			tarnum, err := strconv.Atoi(string(fn[len(fn)-6]))
+			if err != nil {
+				log.Fatal("strconv.Atoi error")
 			}
-			c.JobchanReducePrapare <- TempJob
+			value, ok := c.JobReducePrapares.Load(tarnum)
+			if !ok {
+				log.Fatal("reduce job not found")
+			}
+			value.(*Job).FileName = append(value.(*Job).FileName, fn)
+			if IsDebug {
+				fmt.Println("reduce job", value.(*Job).FileName, fn)
+			}
 		}
 		if Mn == 0 {
 			go c.SendReduceJob()
 		}
 	case ReduceJob:
-		c.redwg.Done()
 		for _, fn := range args.Job.FileName {
-			path := "../main/" + fn
+			path := ""
+			if Issh {
+				path = "../" + fn
+			} else {
+				path = "../main/" + fn
+			}
 			err := os.Remove(path)
 			if IsDebug {
 				fmt.Println("remove file", path, err)
@@ -163,6 +180,7 @@ func (c *Coordinator) JobDone(args *JobDoneArgs, reply *JobDoneReply) error {
 				log.Fatal(err)
 			}
 		}
+		c.redwg.Done()
 	}
 	return nil
 }
@@ -182,7 +200,12 @@ func (c *Coordinator) MakeMapJob(files []string) {
 		c.mu.Unlock()
 		go func(fp string) {
 			id := c.generateJobid()
-			fmt.Println("making map job", id)
+			if Issh {
+				fp = fp[3:]
+			}
+			if IsDebug {
+				fmt.Println("making map job", id)
+			}
 			job := &Job{
 				JobType:   MapJob,
 				FileName:  []string{fp},
@@ -218,7 +241,9 @@ func (c *Coordinator) MakeReduceJob(nReduce int) {
 		c.redwg.Add(1)
 		go func(i int) {
 			id := c.generateJobid()
-			fmt.Println("making reduce job", id)
+			if IsDebug {
+				fmt.Println("making reduce job", id)
+			}
 			c.mu.Lock()
 			RN := c.ReduceNum
 			c.ReduceNum++
@@ -229,7 +254,7 @@ func (c *Coordinator) MakeReduceJob(nReduce int) {
 				Reducenum: RN,
 				Jobid:     id,
 			}
-			c.JobchanReducePrapare <- job
+			c.JobReducePrapares.Store(RN, job)
 		}(i)
 
 	}
@@ -238,29 +263,22 @@ func (c *Coordinator) MakeReduceJob(nReduce int) {
 
 // 发送reduce任务
 func (c *Coordinator) SendReduceJob() {
-	for {
-		select {
-		case job := <-c.JobchanReducePrapare:
-			if IsDebug {
-				fmt.Println("send reduce job", job.Jobid, job.FileName)
-			}
-			c.Jobchan <- job
-		default:
-			return
-		}
-	}
+	c.JobReducePrapares.Range(func(key, value interface{}) bool {
+		c.Jobchan <- value.(*Job)
+		return true
+	})
 }
 
 // 发送done任务
 func (c *Coordinator) SendDoneJob() {
 	c.redwg.Wait()
+	c.isDone = true
 	c.Jobchan <- &Job{
 		JobType:   Done,
 		FileName:  []string{},
 		Reducenum: 0,
 		Jobid:     c.generateJobid(),
 	}
-	c.isDone = true
 }
 
 // start a thread that listens for RPCs from worker.go
@@ -299,7 +317,7 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	// Your code here.
 	//初始化coordinator
 	c.Jobchan = make(chan *Job)
-	c.JobchanReducePrapare = make(chan *Job, 10)
+	c.JobReducePrapares = sync.Map{}
 	c.Jobtracker = sync.Map{}
 	c.Worktracker = sync.Map{}
 	c.uniJobid = 0

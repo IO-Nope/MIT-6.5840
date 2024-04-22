@@ -14,7 +14,8 @@ import (
 	"time"
 )
 
-var IsDebug bool = true
+var IsDebug bool = false
+var Issh bool = true
 
 // for sorting by key.
 type ByKey []KeyValue
@@ -62,98 +63,129 @@ func Worker(mapf func(string, string) []KeyValue,
 
 	// Your worker implementation here.
 	// 初始化
-
-	job, workerid := JobRequest()
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go AliveBeats(workerid, ctx)
-	if job == nil {
-		if IsDebug {
-			fmt.Println("no job")
-		}
-		return
-	}
-	if IsDebug {
-		fmt.Println("jobtype:", job.JobType, "jobfiles:", job.FileName, "jobid:", job.Jobid)
-	}
-	switch job.JobType {
-	case MapJob:
-		intermediate := []KeyValue{}
-		Rq := ReadRequest(workerid, job.Jobid)
-		if !Rq {
-			return
-		}
-		file, err := os.Open("../main/" + job.FileName[0])
-		if IsDebug {
-			fmt.Println(job.FileName[0])
-		}
-		Check(err)
-		content, err := io.ReadAll(file)
-		Check(err)
-		file.Close()
-		kva := mapf(job.FileName[0], string(content))
-		intermediate = append(intermediate, kva...)
-		// 写入json
-		Wq := WriteRequest(workerid, job.Jobid)
-		if !Wq {
-			return
-		}
-		for _, kv := range intermediate {
-			path := "../main/" + "mr-" + strconv.Itoa(job.Jobid) + "-" + strconv.Itoa(ihash(kv.Key)%10) + ".json"
-			writedone := WriteType{Kvs: []KeyValue{kv}, Path: path}
-			WriteKvsToJson(writedone)
-			fs := "mr-" + strconv.Itoa(job.Jobid) + "-" + strconv.Itoa(ihash(kv.Key)%10) + ".json"
-			for i, f := range job.FileName {
-				if f == fs {
-					break
+	for {
+		func() {
+			job, workerid := JobRequest()
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			go AliveBeats(workerid, ctx)
+			if job == nil {
+				if IsDebug {
+					fmt.Println("no job")
 				}
-				if i == len(job.FileName)-1 {
-					job.FileName = append(job.FileName, fs)
+				time.Sleep(1 * time.Second)
+				return
+			}
+			if IsDebug {
+				fmt.Println("jobtype:", job.JobType, "jobfiles:", job.FileName, "jobid:", job.Jobid)
+			}
+			switch job.JobType {
+			case MapJob:
+				intermediate := []KeyValue{}
+				Rq := ReadRequest(workerid, job.Jobid)
+				if !Rq {
+					return
 				}
-			}
+				path := ""
+				if Issh {
+					path = "../" + job.FileName[0]
+				} else {
+					path = "../main/" + job.FileName[0]
+				}
+				file, err := os.Open(path)
+				if IsDebug {
+					fmt.Println(job.FileName[0])
+				}
+				if err != nil {
+					fmt.Println(err)
+					return
+				}
+				content, err := io.ReadAll(file)
+				if err != nil {
+					fmt.Println(err)
+					return
+				}
+				file.Close()
+				kva := mapf(job.FileName[0], string(content))
+				intermediate = append(intermediate, kva...)
+				// 写入json
+				Wq := WriteRequest(workerid, job.Jobid)
+				if !Wq {
+					return
+				}
+				for _, kv := range intermediate {
+					path := ""
+					if Issh {
+						path = "../" + "mr-" + strconv.Itoa(job.Jobid) + "-" + strconv.Itoa(ihash(kv.Key)%10) + ".json"
+					} else {
+						path = "../main/" + "mr-" + strconv.Itoa(job.Jobid) + "-" + strconv.Itoa(ihash(kv.Key)%10) + ".json"
+					}
+					writedone := WriteType{Kvs: []KeyValue{kv}, Path: path}
+					WriteKvsToJson(writedone)
+					fs := "mr-" + strconv.Itoa(job.Jobid) + "-" + strconv.Itoa(ihash(kv.Key)%10) + ".json"
+					for i, f := range job.FileName {
+						if f == fs {
+							break
+						}
+						if i == len(job.FileName)-1 {
+							job.FileName = append(job.FileName, fs)
+						}
+					}
 
-		}
-		SendJobDone(job, workerid)
-	case ReduceJob:
-		// reduce
-		intermediate := []KeyValue{}
-		Rq := ReadRequest(workerid, job.Jobid)
-		if !Rq {
-			return
-		}
-		for _, filename := range job.FileName {
-			path := "../main/" + filename
-			kvs := ReadKvsFromJson(path)
-			intermediate = append(intermediate, kvs...)
-		}
-		sort.Sort(ByKey(intermediate))
-		oname := "../main/" + "mr-out-" + strconv.Itoa(job.Reducenum) + ".txt"
-		Wq := WriteRequest(workerid, job.Jobid)
-		if !Wq {
-			return
-		}
-		ofile, _ := os.Create(oname)
-		i := 0
-		for i < len(intermediate) {
-			j := i + 1
-			for j < len(intermediate) && intermediate[j].Key == intermediate[i].Key {
-				j++
-			}
-			values := []string{}
-			for k := i; k < j; k++ {
-				values = append(values, intermediate[k].Value)
-			}
-			output := reducef(intermediate[i].Key, values)
+				}
+				SendJobDone(job, workerid)
+			case ReduceJob:
+				// reduce
+				intermediate := []KeyValue{}
+				Rq := ReadRequest(workerid, job.Jobid)
+				if !Rq {
+					return
+				}
+				for _, filename := range job.FileName {
+					path := ""
+					if Issh {
+						path = "../" + filename
+					} else {
+						path = "../main/" + filename
+					}
+					kvs := ReadKvsFromJson(path)
+					intermediate = append(intermediate, kvs...)
+				}
+				sort.Sort(ByKey(intermediate))
+				oname := ""
+				if Issh {
+					oname = "mr-out-" + strconv.Itoa(job.Reducenum) + ".txt"
+				} else {
+					oname = "../main/" + "mr-out-" + strconv.Itoa(job.Reducenum) + ".txt"
+				}
+				Wq := WriteRequest(workerid, job.Jobid)
+				if !Wq {
+					return
+				}
+				ofile, _ := os.Create(oname)
+				i := 0
+				for i < len(intermediate) {
+					j := i + 1
+					for j < len(intermediate) && intermediate[j].Key == intermediate[i].Key {
+						j++
+					}
+					values := []string{}
+					for k := i; k < j; k++ {
+						values = append(values, intermediate[k].Value)
+					}
+					output := reducef(intermediate[i].Key, values)
 
-			// this is the correct format for each line of Reduce output.
-			fmt.Fprintf(ofile, "%v %v\n", intermediate[i].Key, output)
+					// this is the correct format for each line of Reduce output.
+					fmt.Fprintf(ofile, "%v %v\n", intermediate[i].Key, output)
 
-			i = j
-		}
-		ofile.Close()
-		SendJobDone(job, workerid)
-	case Done:
-		return
+					i = j
+				}
+				ofile.Close()
+				SendJobDone(job, workerid)
+			case Done:
+				return
+			}
+		}()
 	}
 }
 
@@ -165,12 +197,18 @@ func Debugfunc(vals ...interface{}) {}
 // 将kv对写入.json
 func WriteKvsToJson(kvswtype WriteType) {
 	file, err := os.OpenFile(kvswtype.Path, os.O_APPEND|os.O_WRONLY|os.O_CREATE, 0666)
-	Check(err)
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
 	defer file.Close()
 	enc := json.NewEncoder(file)
 	for _, kv := range kvswtype.Kvs {
 		err := enc.Encode(&kv)
-		Check(err)
+		if err != nil {
+			fmt.Println(err)
+			return
+		}
 		if err != nil {
 			break
 		}
