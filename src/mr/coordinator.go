@@ -200,9 +200,6 @@ func (c *Coordinator) MakeMapJob(files []string) {
 		c.mu.Unlock()
 		go func(fp string) {
 			id := c.generateJobid()
-			if Issh {
-				fp = fp[3:]
-			}
 			if IsDebug {
 				fmt.Println("making map job", id)
 			}

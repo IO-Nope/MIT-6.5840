@@ -88,7 +88,7 @@ func Worker(mapf func(string, string) []KeyValue,
 				}
 				path := ""
 				if Issh {
-					path = "../" + job.FileName[0]
+					path = job.FileName[0]
 				} else {
 					path = "../main/" + job.FileName[0]
 				}
@@ -149,6 +149,12 @@ func Worker(mapf func(string, string) []KeyValue,
 						path = "../main/" + filename
 					}
 					kvs := ReadKvsFromJson(path)
+					if kvs == nil {
+						if IsDebug {
+							fmt.Println("kvs is nil")
+						}
+						return
+					}
 					intermediate = append(intermediate, kvs...)
 				}
 				sort.Sort(ByKey(intermediate))
