@@ -1,6 +1,6 @@
 # MIT-6.5840 分布式系统
 
-[课程链接]()
+[课程链接](https://pdos.csail.mit.edu/6.824/index.html)
 ## 完成情况
  - [x] Lab1: MapReduce
  - [ ] Lab2A: Raft, leader election
