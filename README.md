@@ -3,13 +3,14 @@
 [课程链接](https://pdos.csail.mit.edu/6.824/index.html)
 ## 完成情况
  - [x] Lab1: MapReduce
- - [ ] Lab2A: Raft, leader election
- - [ ] Lab2B: Raft, log
- - [ ] Lab2C: Raft, persistence
- - [ ] Lab2D: Raft, log compaction
- - [ ] Lab3A: Fault-tolerant Key/Value Service without snapshots
- - [ ] Lab3B: Fault-tolerant Key/Value Service with snapshots
- - [ ] Lab4: Sharded Key/Value Service
+ - [x] Lab2: Key/Value Server
+ - [ ] Lab3A: Raft, leader election
+ - [ ] Lab3B: Raft, log
+ - [ ] Lab3C: Raft, persistence
+ - [ ] Lab3D: Raft, log compaction
+ - [ ] Lab4A: Fault-tolerant Key/Value Service without snapshots
+ - [ ] Lab4B: Fault-tolerant Key/Value Service with snapshots
+ - [ ] Lab5: Sharded Key/Value Service
 
 ---
 
@@ -56,10 +57,28 @@
 - [ ] 完善workerid的问题,现在的workerid更像是coordinator的workjobid
 - [ ] 通过Lab1的No-Credit考验
 ---
+## Lab2: Key/Value Server
+> 注: 这个Lab是2024新加的
+
+完成状态: 
+- [x] 已完成
+### 思路:
+- 项目架构
+- 测试思路
+- 笔记和思路51补吧,没精力了
+- 
+### 测试代码:
 ```
- 
-
+    cd src/kvsrv
+    go test
 ```
-
-
+### Hints/遭遇
+- 我是大傻逼！我是大傻逼！我是大傻逼！我是大傻逼！我是大傻逼！我是大傻逼！我是大傻逼！我是大傻逼！
+- 弄清楚需求!搞清楚错在哪!看一看最基本的地方！
+- 这个项目里注释掉了一堆用来实现"并行线性化"的东西,它在这个Lab里是完全不需要的！
+--- 
+## Lab3A: Raft, leader election
+完成状态: 
+- [ ] 已完成
+### 思路:
 
