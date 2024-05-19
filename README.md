@@ -4,7 +4,7 @@
 ## 完成情况
  - [x] Lab1: MapReduce
  - [x] Lab2: Key/Value Server
- - [ ] Lab3A: Raft, leader election
+ - [x] Lab3A: Raft, leader election
  - [ ] Lab3B: Raft, log
  - [ ] Lab3C: Raft, persistence
  - [ ] Lab3D: Raft, log compaction
