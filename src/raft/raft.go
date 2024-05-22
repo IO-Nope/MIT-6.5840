@@ -171,28 +171,40 @@ type RequestVoteReply struct {
 // example RequestVote RPC handler.
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (3A, 3B).
-	rf.mu.Lock()
-	if args.Term > rf.currentTerm && rf.state != Follower {
-		rf.currentTerm = args.Term
-		rf.state = Follower
-		rf.votedFor.mu.Lock()
-		rf.votedFor.vote = -1
-		rf.votedFor.mu.Unlock()
-	}
-	rf.mu.Unlock()
+
 	if args.Term < rf.currentTerm {
+		DPrintfA("Server %d refuse to vote for %d because it's term", rf.me, args.CandidateId)
 		reply.VoteGranted = false
 		reply.Term = rf.currentTerm
 		return
 	}
+	rf.mu.Lock()
+	if args.Term > rf.currentTerm {
+		rf.currentTerm = args.Term
+		rf.state = Follower
+		rf.votedFor.mu.Lock()
+		rf.votedFor.vote = -1
+		rf.votedFor.vote = args.CandidateId
+		reply.VoteGranted = true
+		reply.Term = rf.currentTerm
+		DPrintfA("Server %d vote for %d at election term %d because out of term", rf.me, args.CandidateId, rf.currentTerm)
+		rf.votedFor.mu.Unlock()
+		rf.mu.Unlock()
+		return
+	}
+	rf.mu.Unlock()
 	rf.votedFor.mu.Lock()
 	defer rf.votedFor.mu.Unlock()
-	if rf.votedFor.vote == -1 {
+	if rf.votedFor.vote == -1 && rf.state != Leader {
+		DPrintfA("Server %d vote for %d at election term %d", rf.me, args.CandidateId, rf.currentTerm)
 		rf.votedFor.vote = args.CandidateId
 		reply.VoteGranted = true
 		reply.Term = rf.currentTerm
 		return
 	}
+	DPrintfA("Server %d refuse to vote for %d", rf.me, args.CandidateId)
+	reply.VoteGranted = false
+	reply.Term = rf.currentTerm
 }
 
 // AppendEntries RPC arguments structure.
@@ -223,9 +235,15 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.mu.Unlock()
 		reply.Success = true
 		reply.Term = rf.currentTerm
+		DPrintfA("server %d change their term because leader %d at term %d", rf.me, args.LeaderId, args.Term)
+	}
+	if rf.votedFor.vote != args.LeaderId {
+		rf.votedFor.mu.Lock()
+		rf.votedFor.vote = args.LeaderId
+		rf.votedFor.mu.Unlock()
 	}
 	rf.beatTimer.mu.Lock()
-	rf.beatTimer.time = 1
+	rf.beatTimer.time = 2
 	rf.beatTimer.mu.Unlock()
 	//3B
 }
@@ -284,7 +302,7 @@ func (rf *Raft) sendHreatBeats() {
 				rf.sendAppendEntries(i, &args, &reply)
 			}(i)
 		}
-		time.Sleep(50 * time.Millisecond)
+		time.Sleep(time.Duration(300) * time.Millisecond)
 	}
 }
 
@@ -329,6 +347,10 @@ func (rf *Raft) killed() bool {
 	return z == 1
 }
 func (rf *Raft) election(ctx context.Context, temchan chan bool) {
+	if rf.state != Candidate {
+		DPrintfA("election stop because isn't Candidate")
+		return
+	}
 	rf.mu.Lock()
 	rf.currentTerm++
 	rf.votedFor.mu.Lock()
@@ -338,12 +360,15 @@ func (rf *Raft) election(ctx context.Context, temchan chan bool) {
 	rf.mu.Unlock()
 	votes := 1
 	voted := 1
+	endchan := make(chan bool, 1)
 	tempmu := sync.Mutex{}
 	tempcond := sync.NewCond(&tempmu)
 	for i := range rf.peers {
 		select {
 		case <-ctx.Done():
-			DPrintf("Server %d time out", rf.me)
+			DPrintfA("Server %d time out", rf.me)
+			return
+		case <-endchan:
 			return
 		default:
 		}
@@ -363,9 +388,9 @@ func (rf *Raft) election(ctx context.Context, temchan chan bool) {
 			if voted >= len(rf.peers) {
 				return
 			}
+			rf.mu.Lock()
 			if reply.Term > rf.currentTerm {
-				DPrintf("Server %d out of term", rf.me)
-				rf.mu.Lock()
+				DPrintfA("Server %d out of term", rf.me)
 				rf.currentTerm = reply.Term
 				rf.state = Follower
 				rf.votedFor.mu.Lock()
@@ -378,6 +403,7 @@ func (rf *Raft) election(ctx context.Context, temchan chan bool) {
 				tempmu.Unlock()
 				return
 			}
+			rf.mu.Unlock()
 			tempmu.Lock()
 			defer tempmu.Unlock()
 			voted++
@@ -391,7 +417,7 @@ func (rf *Raft) election(ctx context.Context, temchan chan bool) {
 	tempmu.Lock()
 	for votes < len(rf.peers)/2+1 {
 		if voted >= len(rf.peers) {
-			DPrintf("Server %d failed at becoming a leader", rf.me)
+			DPrintfA("Server %d failed at becoming a leader", rf.me)
 			if rf.state == Candidate {
 				rf.mu.Lock()
 				rf.state = Follower
@@ -406,20 +432,23 @@ func (rf *Raft) election(ctx context.Context, temchan chan bool) {
 	rf.mu.Lock()
 	select {
 	case <-ctx.Done():
-		DPrintf("Server %d time out", rf.me)
+		DPrintfA("Server %d time out", rf.me)
 		rf.state = Follower
 		rf.mu.Unlock()
+		endchan <- true
 		return
 	default:
 	}
 	if rf.state != Candidate {
 		rf.mu.Unlock()
-		DPrintf("Server %d failed beacause it is a follower!", rf.me)
+		DPrintfA("Server %d failed beacause it is a follower!", rf.me)
+		endchan <- true
 		return
 	}
-	DPrintf("%d get %d votes of %d peers and voted %d", rf.me, votes, len(rf.peers), voted)
-	DPrintf("Server %d become a leader", rf.me)
+	DPrintfA("%d get %d votes of %d peers and voted %d", rf.me, votes, len(rf.peers), voted)
+	DPrintfA("Server %d become a leader at term %d", rf.me, rf.currentTerm)
 	rf.state = Leader
+	endchan <- true
 	temchan <- true
 	go rf.sendHreatBeats()
 	rf.mu.Unlock()
@@ -430,32 +459,37 @@ func (rf *Raft) ticker() {
 
 		// Your code here (3A)
 		// Check if a leader election should be started.
-		if rf.beatTimer.time == 0 && rf.state != Leader {
-			DPrintf("Server %d start election at Term %d", rf.me, rf.currentTerm+1)
+		if rf.beatTimer.time <= 0 && rf.state != Leader {
+			rf.mu.Lock()
+			rf.state = Candidate
+			rf.mu.Unlock()
+			DPrintfA("Server %d start election at Term %d", rf.me, rf.currentTerm+1)
 			ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 			suchan := make(chan bool)
 			fachan := make(chan bool)
 			go rf.election(ctx, suchan)
-			ms := 50 + (rand.Int63() % 100)
+			ms := 30 + (rand.Int63() % 170)
 			go func() {
 				time.Sleep(time.Duration(ms) * time.Millisecond)
 				fachan <- true
 			}()
 			select {
 			case <-fachan:
+				DPrintfA("Server %d timeout", rf.me)
 				cancel()
-				continue
+
 			case <-suchan:
+				DPrintfA("Server %d finish election", rf.me)
 				cancel()
 			}
 
 		}
 		rf.beatTimer.mu.Lock()
-		rf.beatTimer.time = 0
+		rf.beatTimer.time--
 		rf.beatTimer.mu.Unlock()
 		// pause for a random amount of time between 50 and 350
 		// milliseconds.
-		ms := 50 + (rand.Int63() % 300)
+		ms := 150 + (rand.Int63() % 200)
 		time.Sleep(time.Duration(ms) * time.Millisecond)
 	}
 }
